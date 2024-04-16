@@ -1,7 +1,7 @@
 #include "TlsMemPool.h"
 #include <iostream>
 
-TlsMemPoolManager<int> g_TlsMemPoolMgr(100);
+TlsMemPoolManager<int> g_TlsMemPoolMgr(100, 100);
 
 unsigned __stdcall WorkerThreadFunc(void* arg) {
 	std::cout << "hello" << std::endl;

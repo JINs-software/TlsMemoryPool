@@ -3,6 +3,9 @@
 #include <map>
 #include <mutex>
 
+#define DEFAULT_MEM_POOL_SIZE	20000
+#define DEFAULT_SURPLUS_SIZE	20000
+
 template<typename T>
 class TlsMemPoolManager;
 
@@ -57,7 +60,8 @@ class TlsMemPoolManager {
 
 
 public:
-	TlsMemPoolManager(size_t defaultMemPoolSize);
+	TlsMemPoolManager();
+	TlsMemPoolManager(size_t defaultMemPoolSize, size_t surplusListSize);
 
 	DWORD AllocTlsMemPool(size_t initUnitCnt = 0);
 	inline DWORD GetTlsMemPoolIdx() { return m_TlsIMainIndex; }
@@ -70,7 +74,7 @@ private:
 	DWORD m_TlsIMainIndex;
 	DWORD m_TlsSurpIndex;
 	size_t m_DefaultMemPoolSize;
-	size_t m_MaxFreeListSize;
+	size_t m_SurplusListSize;
 
 	std::map<DWORD, LockFreeMemPool*> m_ThMemPoolMap;
 	std::mutex m_ThMemPoolMapMtx;
@@ -119,8 +123,12 @@ void TlsMemPool<T>::FreeMem(T* address) {
 // TlsMemPoolManager
 ////////////////////////////////////////////////////////////////////////////////
 template<typename T>
-TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolSize)
-	: m_DefaultMemPoolSize(defaultMemPoolSize)
+TlsMemPoolManager<T>::TlsMemPoolManager() {
+	TlsMemPoolManager(DEFAULT_MEM_POOL_SIZE, DEFAULT_SURPLUS_SIZE);
+}
+template<typename T>
+TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolSize, size_t surplusListSize)
+	: m_DefaultMemPoolSize(defaultMemPoolSize), m_SurplusListSize(surplusListSize)
 {
 	m_TlsIMainIndex = TlsAlloc();
 	m_TlsSurpIndex = TlsAlloc();
@@ -152,6 +160,8 @@ DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t initUnitCnt) {
 		else {
 			newTlsMemPool->m_UnitCnt = initUnitCnt;
 		}
+
+		newTlsMemPool->m_MaxFreeListSize = m_DefaultMemPoolSize;
 
 		// The calloc function allocates storage space for an array of number elements, each of length size bytes.Each element is initialized to 0.
 		newTlsMemPool->m_FreeFront = (PBYTE)calloc(newTlsMemPool->m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
