@@ -146,6 +146,7 @@ DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t initUnitCnt) {
 
 		// LockFreeMemPool »ý¼º
 		LockFreeMemPool* newLockFreeMemPool = new LockFreeMemPool();
+		TlsSetValue(m_TlsSurpIndex, newLockFreeMemPool);
 
 		DWORD thID = GetThreadId(GetCurrentThread());
 		{
@@ -262,7 +263,7 @@ inline void TlsMemPoolManager<T>::LockFreeMemPool::Free(T* address)
 		do {
 			freeFront = m_FreeFront;
 			*reinterpret_cast<PUINT_PTR>(ptr) = static_cast<UINT_PTR>(freeFront.ptr) & mask;
-		} while (!InterlockedCompareExchange128(reinterpret_cast<LONG64*>(&m_FreeFront), reinterpret_cast<UINT_PTR>(address) ^ increment, freeFront.cnt + 1, reinterpret_cast<LONG64*>(&freeFront)));
+		} while (!InterlockedCompareExchange128(reinterpret_cast<LONG64*>(&m_FreeFront), freeFront.cnt + 1, reinterpret_cast<UINT_PTR>(address) ^ increment, reinterpret_cast<LONG64*>(&freeFront)));
 	}
 }
 
