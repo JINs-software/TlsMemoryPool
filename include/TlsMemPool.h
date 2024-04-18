@@ -13,8 +13,11 @@ template<typename T>
 class TlsMemPool {
 	template<typename T>
 	friend class TlsMemPoolManager;
-private:
-	TlsMemPool() {}
+private:	// private 생성자 -> 임의의 생성을 막는다. 
+	// placementNew == true, Alloc / Free 시 placement_new, ~() 소멸자 호출
+	// placementNew == false, 메모리 풀에서는 생성자까지 호출된 객체로부터 관리가 시작되어야 함 (240417 논의)
+	TlsMemPool(size_t unitCnt, size_t capacity, bool placementNew = false);
+	~TlsMemPool();
 
 public:
 	T* AllocMem();
@@ -22,12 +25,10 @@ public:
 
 private:
 	TlsMemPoolManager<T>* m_MemPoolMgr;
-	PBYTE m_FreeFront;
-	size_t m_UnitCnt;
-	size_t m_MaxFreeListSize;
-
-	PBYTE m_SurplusFront;
-	size_t m_SurplusCnt;
+	PBYTE	m_FreeFront;
+	size_t	m_UnitCnt;
+	size_t	m_Capacity;
+	bool	m_PlacementNewFlag;
 };
 
 template<typename T>
@@ -61,9 +62,9 @@ class TlsMemPoolManager {
 
 public:
 	TlsMemPoolManager();
-	TlsMemPoolManager(size_t defaultMemPoolSize, size_t surplusListSize);
+	TlsMemPoolManager(size_t defaultMemPoolUnitCnt, size_t surplusListSize);
 
-	DWORD AllocTlsMemPool(size_t initUnitCnt = 0);
+	DWORD AllocTlsMemPool(size_t memPoolUnitCnt = 0);
 	inline DWORD GetTlsMemPoolIdx() { return m_TlsIMainIndex; }
 	inline TlsMemPool<T>& GetTlsMemPool() { return *reinterpret_cast<TlsMemPool<T>*>(TlsGetValue(m_TlsIMainIndex)); }
 
@@ -73,7 +74,7 @@ public:
 private:
 	DWORD m_TlsIMainIndex;
 	DWORD m_TlsSurpIndex;
-	size_t m_DefaultMemPoolSize;
+	size_t m_DefaultMemPoolUnitCnt;
 	size_t m_SurplusListSize;
 
 	std::map<DWORD, LockFreeMemPool*> m_ThMemPoolMap;
@@ -84,16 +85,49 @@ private:
 // TlsMemPool
 ////////////////////////////////////////////////////////////////////////////////
 template<typename T>
+TlsMemPool<T>::TlsMemPool(size_t unitCnt, size_t capacity, bool placementNew) 
+	: m_UnitCnt(unitCnt), m_Capacity(capacity), m_PlacementNewFlag(placementNew)
+{
+	m_UnitCnt = unitCnt;
+	m_Capacity = capacity;
+
+	// 동적 할당 함수로 m_UnitCnt * (크기) 만큼의 청크를 할당받는 이유는 캐시 효과를 더 누리기 위해서...
+	m_FreeFront = (PBYTE)calloc(m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
+	if (m_FreeFront == NULL) {
+		DebugBreak();
+	}
+	PBYTE ptr = m_FreeFront;
+	for (size_t idx = 0; idx < m_UnitCnt - 1; idx++) {
+		if (m_PlacementNewFlag == false) {
+			T* tptr = reinterpret_cast<T*>(ptr);
+			new (tptr) T;
+		}
+		ptr += sizeof(T);
+		*(reinterpret_cast<PUINT_PTR>(ptr)) = reinterpret_cast<UINT_PTR>(ptr + sizeof(UINT_PTR));
+		ptr += sizeof(UINT_PTR);
+	}
+}
+template<typename T>
+TlsMemPool<T>::~TlsMemPool() {
+	if (m_PlacementNewFlag == false) {
+		// 초기 생성자 호출 방식에서는 메모리 풀 자체의 소멸자가 호출될 시 관리 객체들의 소멸자를 호출
+		while (m_FreeFront != NULL) {
+			reinterpret_cast<T*>(m_FreeFront)->~T();
+		}
+	}
+}
+
+template<typename T>
 T* TlsMemPool<T>::AllocMem() {
-	PBYTE ret = NULL;
+	PBYTE ptr = NULL;
 
 	if (m_FreeFront == NULL) {
 		// 할당 공간 부족..
 		m_MemPoolMgr->Alloc();
 	}
 
-	ret = m_FreeFront;
-	if (ret != NULL) {
+	ptr = m_FreeFront;
+	if (ptr != NULL) {
 		m_FreeFront = reinterpret_cast<PBYTE>(*reinterpret_cast<PUINT_PTR>(m_FreeFront + sizeof(T)));
 		if (m_UnitCnt == 0) {
 			DebugBreak();
@@ -101,12 +135,21 @@ T* TlsMemPool<T>::AllocMem() {
 		m_UnitCnt--;
 	}
 
-	return reinterpret_cast<T*>(ret);
+	T* ret = reinterpret_cast<T*>(ptr);
+	if (m_PlacementNewFlag) {
+		new (ret) T;
+	}
+
+	return ret;
 }
 
 template<typename T>
 void TlsMemPool<T>::FreeMem(T* address) {
-	if (m_UnitCnt < m_MaxFreeListSize) {
+	if (m_PlacementNewFlag) {
+		address->~T();
+	}
+
+	if (m_UnitCnt < m_Capacity) {
 		PBYTE ptr = reinterpret_cast<PBYTE>(address);
 		ptr += sizeof(T);
 		*reinterpret_cast<PUINT_PTR>(ptr) = reinterpret_cast<UINT_PTR>(m_FreeFront);
@@ -123,25 +166,35 @@ void TlsMemPool<T>::FreeMem(T* address) {
 // TlsMemPoolManager
 ////////////////////////////////////////////////////////////////////////////////
 template<typename T>
-TlsMemPoolManager<T>::TlsMemPoolManager() {
-	TlsMemPoolManager(DEFAULT_MEM_POOL_SIZE, DEFAULT_SURPLUS_SIZE);
+TlsMemPoolManager<T>::TlsMemPoolManager()
+	: TlsMemPoolManager(DEFAULT_MEM_POOL_SIZE, DEFAULT_SURPLUS_SIZE)
+{
+	//TlsMemPoolManager(DEFAULT_MEM_POOL_SIZE, DEFAULT_SURPLUS_SIZE);
+	// => "생성자 위임"을 하지 않으면 멤버가 0으로 초기화된다(?)
 }
 template<typename T>
-TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolSize, size_t surplusListSize)
-	: m_DefaultMemPoolSize(defaultMemPoolSize), m_SurplusListSize(surplusListSize)
+TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolUnitCnt, size_t surplusListSize)
+	: m_DefaultMemPoolUnitCnt(defaultMemPoolUnitCnt), m_SurplusListSize(surplusListSize)
 {
 	m_TlsIMainIndex = TlsAlloc();
 	m_TlsSurpIndex = TlsAlloc();
 }
 
 template<typename T>
-DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t initUnitCnt) {
+DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memPoolUnitCnt) {
 	if (TlsGetValue(m_TlsIMainIndex) == NULL) {
 		// TlsMemPool 생성
-		TlsMemPool<T>* newTlsMemPool = new TlsMemPool<T>();
+		TlsMemPool<T>* newTlsMemPool;// = new TlsMemPool<T>();
+		if (memPoolUnitCnt == 0) {
+			newTlsMemPool = new TlsMemPool<T>(m_DefaultMemPoolUnitCnt, m_DefaultMemPoolUnitCnt);
+		}
+		else {
+			newTlsMemPool = new TlsMemPool<T>(memPoolUnitCnt, memPoolUnitCnt);
+		}
 		if (newTlsMemPool == NULL) {
 			DebugBreak();
 		}
+		newTlsMemPool->m_MemPoolMgr = this;
 		TlsSetValue(m_TlsIMainIndex, newTlsMemPool);
 
 		// LockFreeMemPool 생성
@@ -150,31 +203,9 @@ DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t initUnitCnt) {
 
 		DWORD thID = GetThreadId(GetCurrentThread());
 		{
+			// m_ThMemPoolMap는 멀티-스레드 동시 접근이 발생할 수 있음
 			std::lock_guard<std::mutex> lockGuard(m_ThMemPoolMapMtx);
 			m_ThMemPoolMap.insert({ thID , newLockFreeMemPool });
-		}
-
-		newTlsMemPool->m_MemPoolMgr = this;
-		if (initUnitCnt == 0) {
-			newTlsMemPool->m_UnitCnt = m_DefaultMemPoolSize;
-		}
-		else {
-			newTlsMemPool->m_UnitCnt = initUnitCnt;
-		}
-
-		newTlsMemPool->m_MaxFreeListSize = m_DefaultMemPoolSize;
-
-		// The calloc function allocates storage space for an array of number elements, each of length size bytes.Each element is initialized to 0.
-		newTlsMemPool->m_FreeFront = (PBYTE)calloc(newTlsMemPool->m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
-		PBYTE ptr = newTlsMemPool->m_FreeFront;
-		for (size_t idx = 0; idx < newTlsMemPool->m_UnitCnt - 1; idx++) {
-			ptr += sizeof(T);
-			*(reinterpret_cast<PUINT_PTR>(ptr)) = reinterpret_cast<UINT_PTR>(ptr + sizeof(UINT_PTR));
-			ptr += sizeof(UINT_PTR);
-		}
-
-		if (newTlsMemPool->m_FreeFront == NULL) {
-			DebugBreak();
 		}
 	}
 
