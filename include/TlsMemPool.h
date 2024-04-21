@@ -1,7 +1,17 @@
 #pragma once
 #include <Windows.h>
 #include <map>
+#include <unordered_map>
 #include <mutex>
+
+#define MEMORY_USAGE_TRACKING
+#if defined(MEMORY_USAGE_TRACKING)
+struct stMemAllocInfo {
+	size_t tlsMemPoolUnitCnt = 0;
+	size_t lfMemPoolFreeCnt = 0;
+	size_t mallocCnt = 0;
+};
+#endif
 
 #define DEFAULT_MEM_POOL_SIZE	20000
 #define DEFAULT_SURPLUS_SIZE	20000
@@ -44,14 +54,12 @@ class TlsMemPoolManager {
 			m_FreeFront.ptr = NULL;
 			m_FreeFront.cnt = 0;
 		}
-		T* Alloc(size_t& allocCnt);
-		void Free(T* address);
+		T* AllocLFM(size_t& allocCnt);
+		void FreeLFM(T* address);
 		size_t GetFreeCnt();
 		void Resize(size_t resizeCnt);
 
 	private:
-		//PBYTE m_FreeFront = NULL;
-		//size_t m_UnitCnt = 0;
 
 		alignas(128) LockFreeNode m_FreeFront;
 
@@ -74,11 +82,27 @@ public:
 private:
 	DWORD m_TlsIMainIndex;
 	DWORD m_TlsSurpIndex;
+	DWORD m_TlsMallocCnt;
 	size_t m_DefaultMemPoolUnitCnt;
 	size_t m_SurplusListSize;
 
 	std::map<DWORD, LockFreeMemPool*> m_ThMemPoolMap;
 	std::mutex m_ThMemPoolMapMtx;
+
+#if defined(MEMORY_USAGE_TRACKING)
+public:
+	std::unordered_map<DWORD, stMemAllocInfo> thMemInfo;
+	void ResetMemInfo(size_t tlsMemPoolUnit) {
+		DWORD thID = GetThreadId(GetCurrentThread());
+		LockFreeMemPool* lfMemPool = reinterpret_cast<LockFreeMemPool*>(TlsGetValue(m_TlsSurpIndex));
+		thMemInfo[thID].tlsMemPoolUnitCnt = tlsMemPoolUnit;
+		thMemInfo[thID].lfMemPoolFreeCnt = lfMemPool->GetFreeCnt();
+		thMemInfo[thID].mallocCnt = *(size_t*)TlsGetValue(m_TlsMallocCnt);
+	}
+	std::unordered_map<DWORD, stMemAllocInfo> GetMemInfo() {
+		return thMemInfo;
+	}
+#endif
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -86,25 +110,24 @@ private:
 ////////////////////////////////////////////////////////////////////////////////
 template<typename T>
 TlsMemPool<T>::TlsMemPool(size_t unitCnt, size_t capacity, bool placementNew) 
-	: m_UnitCnt(unitCnt), m_Capacity(capacity), m_PlacementNewFlag(placementNew)
+	: m_FreeFront(NULL), m_UnitCnt(unitCnt), m_Capacity(capacity), m_PlacementNewFlag(placementNew)
 {
-	m_UnitCnt = unitCnt;
-	m_Capacity = capacity;
-
-	// 동적 할당 함수로 m_UnitCnt * (크기) 만큼의 청크를 할당받는 이유는 캐시 효과를 더 누리기 위해서...
-	m_FreeFront = (PBYTE)calloc(m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
-	if (m_FreeFront == NULL) {
-		DebugBreak();
-	}
-	PBYTE ptr = m_FreeFront;
-	for (size_t idx = 0; idx < m_UnitCnt - 1; idx++) {
-		if (m_PlacementNewFlag == false) {
-			T* tptr = reinterpret_cast<T*>(ptr);
-			new (tptr) T;
+	if (m_Capacity > 0) {
+		// 동적 할당 함수로 m_UnitCnt * (크기) 만큼의 청크를 할당받는 이유는 캐시 효과를 더 누리기 위해서...
+		m_FreeFront = (PBYTE)calloc(m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
+		if (m_FreeFront == NULL) {
+			DebugBreak();
 		}
-		ptr += sizeof(T);
-		*(reinterpret_cast<PUINT_PTR>(ptr)) = reinterpret_cast<UINT_PTR>(ptr + sizeof(UINT_PTR));
-		ptr += sizeof(UINT_PTR);
+		PBYTE ptr = m_FreeFront;
+		for (size_t idx = 0; idx < m_UnitCnt - 1; idx++) {
+			if (m_PlacementNewFlag == false) {
+				T* tptr = reinterpret_cast<T*>(ptr);
+				new (tptr) T;
+			}
+			ptr += sizeof(T);
+			*(reinterpret_cast<PUINT_PTR>(ptr)) = reinterpret_cast<UINT_PTR>(ptr + sizeof(UINT_PTR));
+			ptr += sizeof(UINT_PTR);
+		}
 	}
 }
 template<typename T>
@@ -123,6 +146,7 @@ T* TlsMemPool<T>::AllocMem() {
 
 	if (m_FreeFront == NULL) {
 		// 할당 공간 부족..
+		// 메모리 풀 관리자에서 할당을 요청한다.
 		m_MemPoolMgr->Alloc();
 	}
 
@@ -134,6 +158,10 @@ T* TlsMemPool<T>::AllocMem() {
 		}
 		m_UnitCnt--;
 	}
+
+#if defined(MEMORY_USAGE_TRACKING)
+	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
 
 	T* ret = reinterpret_cast<T*>(ptr);
 	if (m_PlacementNewFlag) {
@@ -159,6 +187,10 @@ void TlsMemPool<T>::FreeMem(T* address) {
 	else {
 		m_MemPoolMgr->Free(address);
 	}
+
+#if defined(MEMORY_USAGE_TRACKING)
+	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
 }
 
 
@@ -178,6 +210,7 @@ TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolUnitCnt, size_t sur
 {
 	m_TlsIMainIndex = TlsAlloc();
 	m_TlsSurpIndex = TlsAlloc();
+	m_TlsMallocCnt = TlsAlloc();
 }
 
 template<typename T>
@@ -207,6 +240,11 @@ DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memPoolUnitCnt) {
 			std::lock_guard<std::mutex> lockGuard(m_ThMemPoolMapMtx);
 			m_ThMemPoolMap.insert({ thID , newLockFreeMemPool });
 		}
+
+#if defined(MEMORY_USAGE_TRACKING)
+		TlsSetValue(m_TlsMallocCnt, new size_t(0));
+		thMemInfo.insert({ thID, { 0 } });
+#endif
 	}
 
 	return m_TlsIMainIndex;
@@ -217,13 +255,15 @@ void TlsMemPoolManager<T>::Alloc()
 {
 	TlsMemPool<T>* tlsMemPool = reinterpret_cast<TlsMemPool<T>*>(TlsGetValue(m_TlsIMainIndex));
 	LockFreeMemPool* lfMemPool = reinterpret_cast<LockFreeMemPool*>(TlsGetValue(m_TlsSurpIndex));
-	// 자신의 스레드의 SurplusFront 확인
-	// NULL이 아니라면, m_FreeFront와 m_SurplusFront SWAP..
+
+	// 메모리 풀 관리자 차원에서 스레드마다 관리하는 락-프리 메모리 풀에 여분 메모리가 있는지 확인한다.
+	// 만약 락-프리 메모리 풀에 여분 메모리가 있다면 두 freeFront를 swap 한다.
 	if (lfMemPool->GetFreeCnt() > 0) {
-		tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(lfMemPool->Alloc(tlsMemPool->m_UnitCnt));
+		tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(lfMemPool->AllocLFM(tlsMemPool->m_UnitCnt));
 	}
 
-	// NULL이라면, 다른 스레드들의 SurplusFront와 SWAP
+	// NULL이라면(자신의 락-프리 큐에서 메모리를 얻지 못하였다는 뜻, 
+	// 다른 스레드들의 여분 락-프리 메모리 풀에서 얻는다.
 	if (tlsMemPool->m_FreeFront != NULL) {
 		return;
 	}
@@ -245,11 +285,14 @@ void TlsMemPoolManager<T>::Alloc()
 			}
 
 			if (maxFreeCntPool != NULL) {
-				tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(maxFreeCntPool->Alloc(tlsMemPool->m_UnitCnt));
+				tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(maxFreeCntPool->AllocLFM(tlsMemPool->m_UnitCnt));
 			}
 			else {
 				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(T) + sizeof(UINT_PTR)));
 				tlsMemPool->FreeMem(newAlloc);
+
+				size_t* mallocCntPtr = (size_t*)TlsGetValue(m_TlsMallocCnt);
+				(*mallocCntPtr)++;
 			}
 		} while (tlsMemPool->m_FreeFront == NULL);
 	}
@@ -261,12 +304,12 @@ void TlsMemPoolManager<T>::Alloc()
 template<typename T>
 void TlsMemPoolManager<T>::Free(T* address) {
 	LockFreeMemPool* lfMemPool = reinterpret_cast<LockFreeMemPool*>(TlsGetValue(m_TlsSurpIndex));
-	lfMemPool->Free(address);
+	lfMemPool->FreeLFM(address);
 }
 
 
 template<typename T>
-inline T* TlsMemPoolManager<T>::LockFreeMemPool::Alloc(size_t& allocCnt)
+inline T* TlsMemPoolManager<T>::LockFreeMemPool::AllocLFM(size_t& allocCnt)
 {
 	T* ret = NULL;
 
@@ -276,12 +319,13 @@ inline T* TlsMemPoolManager<T>::LockFreeMemPool::Alloc(size_t& allocCnt)
 	} while (!InterlockedCompareExchange128(reinterpret_cast<LONG64*>(&m_FreeFront), 0, 0, reinterpret_cast<LONG64*>(&freeFront)));
 
 	allocCnt = freeFront.cnt;
+	freeFront.cnt = 0;
 	ret = reinterpret_cast<T*>(freeFront.ptr & mask);
 	return ret;
 }
 
 template<typename T>
-inline void TlsMemPoolManager<T>::LockFreeMemPool::Free(T* address)
+inline void TlsMemPoolManager<T>::LockFreeMemPool::FreeLFM(T* address)
 {
 	if (address != NULL) {
 		UINT_PTR increment = InterlockedIncrement16(&m_Increment);
