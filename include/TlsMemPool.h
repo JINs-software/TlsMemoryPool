@@ -32,6 +32,7 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 public:
 	T* AllocMem();
 	void FreeMem(T* address);
+	void FreeMemNew(T* address);
 
 private:
 	TlsMemPoolManager<T>* m_MemPoolMgr;
@@ -193,6 +194,29 @@ void TlsMemPool<T>::FreeMem(T* address) {
 #endif
 }
 
+template<typename T>
+inline void TlsMemPool<T>::FreeMemNew(T* address)
+{
+	if (!m_PlacementNewFlag) {
+		new (address) T;
+	}
+
+	if (m_UnitCnt < m_Capacity) {
+		PBYTE ptr = reinterpret_cast<PBYTE>(address);
+		ptr += sizeof(T);
+		*reinterpret_cast<PUINT_PTR>(ptr) = reinterpret_cast<UINT_PTR>(m_FreeFront);
+		m_FreeFront = reinterpret_cast<PBYTE>(address);
+		m_UnitCnt++;
+	}
+	else {
+		m_MemPoolMgr->Free(address);
+	}
+
+#if defined(MEMORY_USAGE_TRACKING)
+	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // TlsMemPoolManager
@@ -289,7 +313,7 @@ void TlsMemPoolManager<T>::Alloc()
 			}
 			else {
 				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(T) + sizeof(UINT_PTR)));
-				tlsMemPool->FreeMem(newAlloc);
+				tlsMemPool->FreeMemNew(newAlloc);
 
 				size_t* mallocCntPtr = (size_t*)TlsGetValue(m_TlsMallocCnt);
 				(*mallocCntPtr)++;
