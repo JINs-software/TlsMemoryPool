@@ -19,9 +19,19 @@ template<typename T>
 class TlsMemPoolManager;
 
 
+#define MEM_POOL_NODE
+
 ////////////////////////////////////////////////////////////////////////////////
 // TlsMemPool
 ////////////////////////////////////////////////////////////////////////////////
+#if defined(MEM_POOL_NODE)
+template<typename T>
+struct stMemPoolNode {
+	T unit;
+	alignas(16) stMemPoolNode* next;
+};
+#endif
+
 template<typename T>
 class TlsMemPool {
 	template<typename T>
@@ -37,14 +47,18 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 	~TlsMemPool();
 
 public:
-	T* AllocMem(USHORT refCnt = 1);
+	T* AllocMem(SHORT refCnt = 1);
 	void FreeMem(T* address);
 	void FreeMemNew(T* address);
 	void IncrementRefCnt(T* address, USHORT refCnt = 1);
 
 private:
 	TlsMemPoolManager<T>* m_MemPoolMgr;
+#if defined(MEM_POOL_NODE)
+	stMemPoolNode<T>* m_FreeFront;
+#else
 	PBYTE	m_FreeFront;
+#endif
 	size_t	m_UnitCnt;
 	size_t	m_Capacity;
 	bool	m_PlacementNewFlag;
@@ -56,6 +70,25 @@ TlsMemPool<T>::TlsMemPool(size_t unitCnt, size_t capacity, bool referenceFlag,  
 	: m_FreeFront(NULL), m_UnitCnt(unitCnt), m_Capacity(capacity), m_ReferenceFlag(referenceFlag), m_PlacementNewFlag(placementNew)
 {
 	if (m_Capacity > 0) {
+#if defined(MEM_POOL_NODE)
+		m_FreeFront = (stMemPoolNode<T>*)calloc(m_UnitCnt, sizeof(stMemPoolNode<T>));
+		if (m_FreeFront == NULL) {
+			DebugBreak();
+		}
+
+		stMemPoolNode<T>* nodePtr = (stMemPoolNode<T>*)(m_FreeFront);
+		for (size_t idx = 0; idx < m_UnitCnt; idx++) {
+			if (m_PlacementNewFlag == false) {
+				T* tptr = reinterpret_cast<T*>(nodePtr);
+				new (tptr) T;
+			}
+
+			nodePtr->next = nodePtr + 1;
+			nodePtr += 1;
+		}
+		nodePtr -= 1;
+		nodePtr->next = NULL;	// 맨 마지막 꼬리는 NULL
+#else
 		// 동적 할당 함수로 m_UnitCnt * (크기) 만큼의 청크를 할당받는 이유는 캐시 효과를 더 누리기 위해서...
 		m_FreeFront = (PBYTE)calloc(m_UnitCnt, sizeof(T) + sizeof(UINT_PTR));
 		if (m_FreeFront == NULL) {
@@ -73,6 +106,7 @@ TlsMemPool<T>::TlsMemPool(size_t unitCnt, size_t capacity, bool referenceFlag,  
 		}
 		ptr -= sizeof(UINT_PTR);
 		*(reinterpret_cast<PUINT_PTR>(ptr)) = NULL;	// 맨 마지막 꼬리는 NULL
+#endif
 	}
 }
 
@@ -82,12 +116,58 @@ TlsMemPool<T>::~TlsMemPool() {
 		// 초기 생성자 호출 방식에서는 메모리 풀 자체의 소멸자가 호출될 시 관리 객체들의 소멸자를 호출
 		while (m_FreeFront != NULL) {
 			reinterpret_cast<T*>(m_FreeFront)->~T();
+#if defined(MEM_POOL_NODE)
+			m_FreeFront = m_FreeFront->next;
+#else
+			m_FreeFront = reinterpret_cast<PBYTE>(*reinterpret_cast<PUINT_PTR>(m_FreeFront + sizeof(T)));
+#endif
 		}
 	}
 }
 
 template<typename T>
-T* TlsMemPool<T>::AllocMem(USHORT refCnt) {
+T* TlsMemPool<T>::AllocMem(SHORT refCnt) {
+#if defined(MEM_POOL_NODE)
+	stMemPoolNode<T>* node = NULL;
+
+	if (m_FreeFront == NULL) {
+		// 할당 공간 부족..
+		// 메모리 풀 관리자에서 할당을 요청한다.
+		m_MemPoolMgr->Alloc();
+	}
+
+	node = m_FreeFront;
+	if (node != NULL) {
+		m_FreeFront = m_FreeFront->next;
+		if (m_UnitCnt == 0) {
+			DebugBreak();
+		}
+		m_UnitCnt--;
+	}
+
+#if defined(MEMORY_USAGE_TRACKING)
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
+	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
+
+	if (m_ReferenceFlag) {
+		//SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+		//*refCntPtr = refCnt;
+
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node) + sizeof(T));
+		*refCntPtr = refCnt;
+#if defined(MEMORY_USAGE_TRACKING)
+		for (SHORT i = 0; i < refCnt; i++) {
+			InterlockedIncrement64((int64*)&m_MemPoolMgr->totalIncrementRefCnt);
+		}
+#endif
+	}
+
+	T* ret = reinterpret_cast<T*>(node);
+	if (m_PlacementNewFlag) {
+		new (ret) T;
+	}
+#else
 	PBYTE ptr = NULL;
 
 	if (m_FreeFront == NULL) {
@@ -106,31 +186,82 @@ T* TlsMemPool<T>::AllocMem(USHORT refCnt) {
 	}
 
 #if defined(MEMORY_USAGE_TRACKING)
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
 	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
 #endif
 
 	if (m_ReferenceFlag) {
-		USHORT* refCntPtr = reinterpret_cast<USHORT*>(ptr + sizeof(T));
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(ptr + sizeof(T));
 		*refCntPtr = refCnt;
+#if defined(MEMORY_USAGE_TRACKING)
+		for (SHORT i = 0; i < refCnt; i++) {
+			InterlockedIncrement64((int64*)&m_MemPoolMgr->totalIncrementRefCnt);
+		}
+#endif
 	}
 
 	T* ret = reinterpret_cast<T*>(ptr);
 	if (m_PlacementNewFlag) {
 		new (ret) T;
 	}
+#endif
 
 	return ret;
 }
 
 template<typename T>
 void TlsMemPool<T>::FreeMem(T* address) {
+#if defined(MEM_POOL_NODE)
+
+	stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
+
 	if (m_ReferenceFlag) {
-		USHORT* refCntPtr = reinterpret_cast<USHORT*>(address + 1);
-		if (InterlockedDecrement16((SHORT*)refCntPtr) > 0) {
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+		SHORT refCnt = InterlockedDecrement16(refCntPtr);
+#if defined(MEMORY_USAGE_TRACKING)
+		InterlockedIncrement64((int64*)&m_MemPoolMgr->totalDecrementRefCnt);
+#endif
+		if (refCnt > 0) {
+			return;
+		}
+
+		if (refCnt < 0) {
+			// 의도되지 않은 흐름
+			DebugBreak();
+		}
+	}
+
+	if (m_PlacementNewFlag) {
+		address->~T();
+	}
+
+	if (m_UnitCnt < m_Capacity) {
+		node->next = m_FreeFront;
+		m_FreeFront = node;
+		m_UnitCnt++;
+	}
+	else {
+		m_MemPoolMgr->Free(address);
+	}
+
+#if defined(MEMORY_USAGE_TRACKING)
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
+	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
+
+#else
+
+	if (m_ReferenceFlag) {
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(address + 1);
+		SHORT refCnt = InterlockedDecrement16(refCntPtr);
+#if defined(MEMORY_USAGE_TRACKING)
+		InterlockedIncrement64((int64*)&m_MemPoolMgr->totalDecrementRefCnt);
+#endif
+		if (refCnt > 0) {
 			return;
 		}
 		
-		if (*refCntPtr < 0) {
+		if (refCnt < 0) {
 			// 의도되지 않은 흐름
 			DebugBreak();
 		}
@@ -152,7 +283,10 @@ void TlsMemPool<T>::FreeMem(T* address) {
 	}
 
 #if defined(MEMORY_USAGE_TRACKING)
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
 	m_MemPoolMgr->ResetMemInfo(m_UnitCnt);
+#endif
+
 #endif
 }
 
@@ -164,10 +298,16 @@ inline void TlsMemPool<T>::FreeMemNew(T* address)
 	}
 
 	if (m_UnitCnt < m_Capacity) {
+#if defined(MEM_POOL_NODE)
+		stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
+		node->next = m_FreeFront;
+		m_FreeFront = node;
+#else
 		PBYTE ptr = reinterpret_cast<PBYTE>(address);
 		ptr += sizeof(T);
 		*reinterpret_cast<PUINT_PTR>(ptr) = reinterpret_cast<UINT_PTR>(m_FreeFront);
 		m_FreeFront = reinterpret_cast<PBYTE>(address);
+#endif
 		m_UnitCnt++;
 	}
 	else {
@@ -183,9 +323,22 @@ template<typename T>
 inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt)
 {
 	if (m_ReferenceFlag) {
-		USHORT* refCntPtr = reinterpret_cast<USHORT*>(address + 1);
+#if defined(MEM_POOL_NODE)
+		stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
+#else
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(address + 1);
+#endif
 		for (USHORT i = 0; i < refCnt; i++) {
+#if defined(MEM_POOL_NODE)
+			SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+			InterlockedIncrement16(refCntPtr);
+#else
 			InterlockedIncrement16((SHORT*)refCntPtr);
+#endif
+
+#if defined(MEMORY_USAGE_TRACKING)
+			InterlockedIncrement64((int64*)&m_MemPoolMgr->totalIncrementRefCnt);
+#endif
 		}
 	}
 }
@@ -248,6 +401,25 @@ private:
 
 #if defined(MEMORY_USAGE_TRACKING)
 public:
+	// 전체 메모리 정보
+	size_t totalAllocMemCnt = 0;
+	size_t totalFreeMemCnt = 0;
+	size_t totalIncrementRefCnt = 0;
+	size_t totalDecrementRefCnt = 0;
+	inline size_t GetTotalAllocMemCnt() {
+		return totalAllocMemCnt;
+	}
+	inline size_t GetTotalFreeMemCnt() {
+		return totalFreeMemCnt;
+	}
+	inline size_t GetTotalIncrementRefCnt() {
+		return totalIncrementRefCnt;
+	}
+	inline size_t GetTotalDecrementRefCnt() {
+		return totalDecrementRefCnt;
+	}
+
+	// 스레드 별 메모리 정보
 	std::unordered_map<DWORD, stMemAllocInfo> thMemInfo;
 	void ResetMemInfo(size_t tlsMemPoolUnit) {
 		DWORD thID = GetThreadId(GetCurrentThread());
@@ -256,6 +428,7 @@ public:
 		thMemInfo[thID].lfMemPoolFreeCnt = lfMemPool->GetFreeCnt();
 		thMemInfo[thID].mallocCnt = *(size_t*)TlsGetValue(m_TlsMallocCnt);
 	}
+	
 	std::unordered_map<DWORD, stMemAllocInfo> GetMemInfo() {
 		return thMemInfo;
 	}
@@ -319,19 +492,25 @@ template<typename T>
 inline DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memPoolUnitCnt, size_t memPoolCapacity)
 {
 	if (TlsGetValue(m_TlsIMainIndex) == NULL) {
+		size_t unitCnt = 0;
+
 		// TlsMemPool 생성
 		TlsMemPool<T>* newTlsMemPool = NULL;
 		if (memPoolUnitCnt == 0 && memPoolCapacity == 0) {
 			newTlsMemPool = new TlsMemPool<T>(m_DefaultMemPoolUnitCnt, m_DefaultMemPoolCapacity, m_MemPoolReferenceFlag, m_MemPoolPlacementNewFlag);
+			unitCnt = m_DefaultMemPoolUnitCnt;
 		}
 		else if (memPoolUnitCnt == 0) {
 			newTlsMemPool = new TlsMemPool<T>(m_DefaultMemPoolUnitCnt, memPoolCapacity, m_MemPoolReferenceFlag, m_MemPoolPlacementNewFlag);
+			unitCnt = m_DefaultMemPoolUnitCnt;
 		}
 		else if (memPoolCapacity == 0) {
 			newTlsMemPool = new TlsMemPool<T>(memPoolUnitCnt, m_DefaultMemPoolCapacity, m_MemPoolReferenceFlag, m_MemPoolPlacementNewFlag);
+			unitCnt = memPoolUnitCnt;
 		}
 		else {
 			newTlsMemPool = new TlsMemPool<T>(memPoolUnitCnt, memPoolCapacity, m_MemPoolReferenceFlag, m_MemPoolPlacementNewFlag);
+			unitCnt = memPoolUnitCnt;
 		}
 
 		if (newTlsMemPool == NULL) {
@@ -356,6 +535,10 @@ inline DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memPoolUnitCnt, size_t
 		TlsSetValue(m_TlsMallocCnt, new size_t(0));	
 		thMemInfo.insert({ thID, { 0 } });
 #endif
+
+#if defined(MEMORY_USAGE_TRACKING)
+		ResetMemInfo(unitCnt);
+#endif
 	}
 
 	return m_TlsIMainIndex;
@@ -370,7 +553,11 @@ void TlsMemPoolManager<T>::Alloc()
 	// 메모리 풀 관리자 차원에서 스레드마다 관리하는 락-프리 메모리 풀에 여분 메모리가 있는지 확인한다.
 	// 만약 락-프리 메모리 풀에 여분 메모리가 있다면 두 freeFront를 swap 한다.
 	if (lfMemPool->GetFreeCnt() > 0) {
+#if defined(MEM_POOL_NODE)
+		tlsMemPool->m_FreeFront = reinterpret_cast<stMemPoolNode<T>*>(lfMemPool->AllocLFM(tlsMemPool->m_UnitCnt));
+#else
 		tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(lfMemPool->AllocLFM(tlsMemPool->m_UnitCnt));
+#endif
 	}
 
 	// NULL이라면(자신의 락-프리 큐에서 메모리를 얻지 못하였다는 뜻, 
@@ -396,10 +583,18 @@ void TlsMemPoolManager<T>::Alloc()
 			}
 
 			if (maxFreeCntPool != NULL) {
+#if defined(MEM_POOL_NODE)
+				tlsMemPool->m_FreeFront = reinterpret_cast<stMemPoolNode<T>*>(maxFreeCntPool->AllocLFM(tlsMemPool->m_UnitCnt));
+#else
 				tlsMemPool->m_FreeFront = reinterpret_cast<PBYTE>(maxFreeCntPool->AllocLFM(tlsMemPool->m_UnitCnt));
+#endif
 			}
 			else {
+#if defined(MEM_POOL_NODE)
+				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(stMemPoolNode<T>)));
+#else
 				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(T) + sizeof(UINT_PTR)));
+#endif
 				tlsMemPool->FreeMemNew(newAlloc);
 
 				size_t* mallocCntPtr = (size_t*)TlsGetValue(m_TlsMallocCnt);
