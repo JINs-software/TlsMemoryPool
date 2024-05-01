@@ -154,7 +154,9 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt) {
 		//SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
 		//*refCntPtr = refCnt;
 
-		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node) + sizeof(T));
+		//SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node) + sizeof(T));
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
+		refCntPtr -= 1;
 		*refCntPtr = refCnt;
 #if defined(MEMORY_USAGE_TRACKING)
 		for (SHORT i = 0; i < refCnt; i++) {
@@ -216,7 +218,11 @@ void TlsMemPool<T>::FreeMem(T* address) {
 	stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
 
 	if (m_ReferenceFlag) {
-		SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+		//SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+		//SHORT refCnt = InterlockedDecrement16(refCntPtr);
+
+		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
+		refCntPtr -= 1;
 		SHORT refCnt = InterlockedDecrement16(refCntPtr);
 #if defined(MEMORY_USAGE_TRACKING)
 		InterlockedIncrement64((int64*)&m_MemPoolMgr->totalDecrementRefCnt);
@@ -330,7 +336,9 @@ inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt)
 #endif
 		for (USHORT i = 0; i < refCnt; i++) {
 #if defined(MEM_POOL_NODE)
-			SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+			//SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
+			SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
+			refCntPtr -= 1;
 			InterlockedIncrement16(refCntPtr);
 #else
 			InterlockedIncrement16((SHORT*)refCntPtr);
