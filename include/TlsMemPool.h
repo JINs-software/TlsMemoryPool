@@ -6,12 +6,22 @@
 
 #define MEMORY_USAGE_TRACKING
 #if defined(MEMORY_USAGE_TRACKING)
-struct stMemAllocInfo {
+struct stMemoryPoolUseInfo {
 	size_t tlsMemPoolUnitCnt = 0;
 	size_t lfMemPoolFreeCnt = 0;
 	size_t mallocCnt = 0;
 };
 #endif
+
+#define ALLOC_MEM_LOG
+#if defined(ALLOC_MEM_LOG)
+struct stAllocMemLog {
+	UINT_PTR address = 0;
+	short refCnt = 0;
+	std::string log = "";
+};
+#endif
+
 
 #define DEFAULT_MEM_POOL_SIZE	20000
 
@@ -47,10 +57,10 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 	~TlsMemPool();
 
 public:
-	T* AllocMem(SHORT refCnt = 1, string log = "");
-	void FreeMem(T* address);
+	T* AllocMem(SHORT refCnt = 1, std::string log = "");
+	void FreeMem(T* address, std::string log = "");
 	void FreeMemNew(T* address);
-	void IncrementRefCnt(T* address, USHORT refCnt = 1);
+	void IncrementRefCnt(T* address, USHORT refCnt = 1, std::string log = "");
 
 private:
 	TlsMemPoolManager<T>* m_MemPoolMgr;
@@ -126,7 +136,11 @@ TlsMemPool<T>::~TlsMemPool() {
 }
 
 template<typename T>
-T* TlsMemPool<T>::AllocMem(SHORT refCnt, string log) {
+T* TlsMemPool<T>::AllocMem(SHORT refCnt, std::string log) {
+#if defined(ALLOC_MEM_LOG)
+	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
+#endif
+
 #if defined(MEM_POOL_NODE)
 	stMemPoolNode<T>* node = NULL;
 
@@ -208,21 +222,43 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, string log) {
 	}
 #endif
 
-	if (log != "") {
-		m_MemPoolMgr->m_AllocLogMtx.lock();
-		m_MemPoolMgr->m_AllocLog.insert({ ret, log });
-		m_MemPoolMgr->m_AllocLogMtx.unlock();
+
+#if defined(ALLOC_MEM_LOG)
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].address = (UINT_PTR)ret;
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].refCnt = refCnt;
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].log = log;
+
+	m_MemPoolMgr->m_AllocMapMtx.lock();
+	if (m_MemPoolMgr->m_AllocMap.find((UINT_PTR)ret) == m_MemPoolMgr->m_AllocMap.end()) {
+		m_MemPoolMgr->m_AllocMap.insert({ (UINT_PTR)ret, refCnt });
 	}
+	else {
+		DebugBreak();
+	}
+	m_MemPoolMgr->m_AllocMapMtx.unlock();
+#endif
 	return ret;
 }
 
 template<typename T>
-void TlsMemPool<T>::FreeMem(T* address) {
-	m_MemPoolMgr->m_AllocLogMtx.lock();
-	if (m_MemPoolMgr->m_AllocLog.find(address) != m_MemPoolMgr->m_AllocLog.end()) {
-		m_MemPoolMgr->m_AllocLog.erase(address);
+void TlsMemPool<T>::FreeMem(T* address, std::string log) {
+#if defined(ALLOC_MEM_LOG)
+	m_MemPoolMgr->m_AllocMapMtx.lock();
+	if (m_MemPoolMgr->m_AllocMap.find((UINT_PTR)address) != m_MemPoolMgr->m_AllocMap.end()) {
+		short refCnt = InterlockedDecrement16(&m_MemPoolMgr->m_AllocMap[(UINT_PTR)address]);
+		if (refCnt == 0) {
+			m_MemPoolMgr->m_AllocMap.erase((UINT_PTR)address);
+		}
 	}
-	m_MemPoolMgr->m_AllocLogMtx.unlock();
+	else {
+		DebugBreak();
+	}
+	m_MemPoolMgr->m_AllocMapMtx.unlock();
+
+	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].address = (UINT_PTR)address;
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].log = log;
+#endif
 
 #if defined(MEM_POOL_NODE)
 
@@ -235,6 +271,11 @@ void TlsMemPool<T>::FreeMem(T* address) {
 		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
 		refCntPtr -= 1;
 		SHORT refCnt = InterlockedDecrement16(refCntPtr);
+
+#if defined(ALLOC_MEM_LOG)
+		m_MemPoolMgr->m_AllocLog[allocMemLogIdx].refCnt = refCnt;
+#endif
+
 #if defined(MEMORY_USAGE_TRACKING)
 		InterlockedIncrement64((int64*)&m_MemPoolMgr->totalDecrementRefCnt);
 #endif
@@ -337,8 +378,25 @@ inline void TlsMemPool<T>::FreeMemNew(T* address)
 }
 
 template<typename T>
-inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt)
+inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt, std::string log)
 {
+#if defined(ALLOC_MEM_LOG)
+	m_MemPoolMgr->m_AllocMapMtx.lock();
+	if (m_MemPoolMgr->m_AllocMap.find((UINT_PTR)address) != m_MemPoolMgr->m_AllocMap.end()) {
+		for (USHORT i = 0; i < refCnt; i++) {
+			InterlockedIncrement16(&m_MemPoolMgr->m_AllocMap[(UINT_PTR)address]);
+		}
+	}
+	else {
+		DebugBreak();
+	}
+	m_MemPoolMgr->m_AllocMapMtx.unlock();
+
+	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].address = (UINT_PTR)address;
+	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].log = log;
+#endif
+
 	if (m_ReferenceFlag) {
 #if defined(MEM_POOL_NODE)
 		stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
@@ -350,9 +408,13 @@ inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt)
 			//SHORT* refCntPtr = reinterpret_cast<SHORT*>(&node->next);
 			SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
 			refCntPtr -= 1;
-			InterlockedIncrement16(refCntPtr);
+			SHORT refCntResult = InterlockedIncrement16(refCntPtr);
 #else
 			InterlockedIncrement16((SHORT*)refCntPtr);
+#endif
+
+#if defined(ALLOC_MEM_LOG)
+			m_MemPoolMgr->m_AllocLog[allocMemLogIdx].refCnt = refCntResult;
 #endif
 
 #if defined(MEMORY_USAGE_TRACKING)
@@ -439,7 +501,7 @@ public:
 	}
 
 	// 스레드 별 메모리 정보
-	std::unordered_map<DWORD, stMemAllocInfo> thMemInfo;
+	std::unordered_map<DWORD, stMemoryPoolUseInfo> thMemInfo;
 	void ResetMemInfo(size_t tlsMemPoolUnit) {
 		DWORD thID = GetThreadId(GetCurrentThread());
 		LockFreeMemPool* lfMemPool = reinterpret_cast<LockFreeMemPool*>(TlsGetValue(m_TlsSurpIndex));
@@ -448,13 +510,19 @@ public:
 		thMemInfo[thID].mallocCnt = *(size_t*)TlsGetValue(m_TlsMallocCnt);
 	}
 	
-	std::unordered_map<DWORD, stMemAllocInfo> GetMemInfo() {
+	std::unordered_map<DWORD, stMemoryPoolUseInfo> GetMemInfo() {
 		return thMemInfo;
 	}
 
+#if defined(ALLOC_MEM_LOG)
 	// 메모리 Alloc 로그
-	std::unordered_map<T*, string> m_AllocLog;
-	std::mutex m_AllocLogMtx;
+	std::vector<stAllocMemLog> m_AllocLog;
+	USHORT m_AllocLogIndex;
+
+	std::map<UINT_PTR, short> m_AllocMap;
+	std::mutex m_AllocMapMtx;
+#endif
+
 #endif
 };
 
@@ -472,6 +540,11 @@ TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolUnitCnt, size_t def
 	m_TlsIMainIndex = TlsAlloc();
 	m_TlsSurpIndex = TlsAlloc();
 	m_TlsMallocCnt = TlsAlloc();
+
+#if defined(ALLOC_MEM_LOG)
+	m_AllocLog.resize(USHRT_MAX);
+	m_AllocLogIndex = -1;
+#endif
 }
 
 //template<typename T>
