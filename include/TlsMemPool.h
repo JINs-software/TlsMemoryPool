@@ -47,7 +47,7 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 	~TlsMemPool();
 
 public:
-	T* AllocMem(SHORT refCnt = 1);
+	T* AllocMem(SHORT refCnt = 1, string log = "");
 	void FreeMem(T* address);
 	void FreeMemNew(T* address);
 	void IncrementRefCnt(T* address, USHORT refCnt = 1);
@@ -126,7 +126,7 @@ TlsMemPool<T>::~TlsMemPool() {
 }
 
 template<typename T>
-T* TlsMemPool<T>::AllocMem(SHORT refCnt) {
+T* TlsMemPool<T>::AllocMem(SHORT refCnt, string log) {
 #if defined(MEM_POOL_NODE)
 	stMemPoolNode<T>* node = NULL;
 
@@ -208,11 +208,22 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt) {
 	}
 #endif
 
+	if (log != "") {
+		m_MemPoolMgr->m_AllocLogMtx.lock();
+		m_MemPoolMgr->m_AllocLog.insert({ ret, log });
+		m_MemPoolMgr->m_AllocLogMtx.unlock();
+	}
 	return ret;
 }
 
 template<typename T>
 void TlsMemPool<T>::FreeMem(T* address) {
+	m_MemPoolMgr->m_AllocLogMtx.lock();
+	if (m_MemPoolMgr->m_AllocLog.find(address) != m_MemPoolMgr->m_AllocLog.end()) {
+		m_MemPoolMgr->m_AllocLog.erase(address);
+	}
+	m_MemPoolMgr->m_AllocLogMtx.unlock();
+
 #if defined(MEM_POOL_NODE)
 
 	stMemPoolNode<T>* node = reinterpret_cast<stMemPoolNode<T>*>(address);
@@ -440,6 +451,10 @@ public:
 	std::unordered_map<DWORD, stMemAllocInfo> GetMemInfo() {
 		return thMemInfo;
 	}
+
+	// 메모리 Alloc 로그
+	std::unordered_map<T*, string> m_AllocLog;
+	std::mutex m_AllocLogMtx;
 #endif
 };
 
