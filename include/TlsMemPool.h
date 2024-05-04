@@ -542,7 +542,7 @@ TlsMemPoolManager<T>::TlsMemPoolManager(size_t defaultMemPoolUnitCnt, size_t def
 	m_TlsMallocCnt = TlsAlloc();
 
 #if defined(ALLOC_MEM_LOG)
-	m_AllocLog.resize(USHRT_MAX);
+	m_AllocLog.resize(USHRT_MAX + 1);
 	m_AllocLogIndex = -1;
 #endif
 }
