@@ -59,9 +59,9 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 public:
 	T* AllocMem(SHORT refCnt = 1, std::string log = "");
 	void FreeMem(T* address, std::string log = "");
+	void IncrementRefCnt(T* address, USHORT refCnt = 1, std::string log = "");
 
 private:
-	void IncrementRefCnt(T* address, USHORT refCnt = 1, std::string log = "");
 	void InjectNewMem(T* address);
 
 private:
