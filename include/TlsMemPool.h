@@ -61,6 +61,13 @@ public:
 	void FreeMem(T* address, std::string log = "");
 	void IncrementRefCnt(T* address, USHORT refCnt = 1, std::string log = "");
 
+	inline size_t GetMemPoolCapacity() {
+		return sizeof(stMemPoolNode<T>) * m_Capacity;
+	}
+	inline size_t GetMemPoolSize() {
+		return sizeof(stMemPoolNode<T>) * m_UnitCnt;
+	}
+
 private:
 	void InjectNewMem(T* address);
 
@@ -487,7 +494,6 @@ public:
 private:
 	DWORD	m_TlsIMainIndex;
 	DWORD	m_TlsSurpIndex;
-	//DWORD	m_TlsMallocCnt;
 	size_t	m_DefaultMemPoolUnitCnt;
 	size_t	m_DefaultMemPoolCapacity;
 	bool	m_MemPoolReferenceFlag;
