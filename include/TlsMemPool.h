@@ -57,9 +57,15 @@ private:	// private 생성자 -> 임의의 생성을 막는다.
 	~TlsMemPool();
 
 public:
+#if defined(ALLOC_MEM_LOG)
 	T* AllocMem(SHORT refCnt = 1, std::string log = "");
 	void FreeMem(T* address, std::string log = "");
 	void IncrementRefCnt(T* address, USHORT refCnt = 1, std::string log = "");
+#else
+	T* AllocMem(SHORT refCnt = 1);
+	void FreeMem(T* address);
+	void IncrementRefCnt(T* address, USHORT refCnt = 1);
+#endif
 
 	inline size_t GetMemPoolCapacity() {
 		return sizeof(stMemPoolNode<T>) * m_Capacity;
@@ -146,9 +152,11 @@ TlsMemPool<T>::~TlsMemPool() {
 }
 
 template<typename T>
-T* TlsMemPool<T>::AllocMem(SHORT refCnt, std::string log) {
 #if defined(ALLOC_MEM_LOG)
+T* TlsMemPool<T>::AllocMem(SHORT refCnt, std::string log) {
 	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
+#else
+T* TlsMemPool<T>::AllocMem(SHORT refCnt) {
 #endif
 
 #if defined(MEM_POOL_NODE)
@@ -262,8 +270,8 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, std::string log) {
 }
 
 template<typename T>
-void TlsMemPool<T>::FreeMem(T* address, std::string log) {
 #if defined(ALLOC_MEM_LOG)
+void TlsMemPool<T>::FreeMem(T* address, std::string log) {
 	m_MemPoolMgr->m_AllocMapMtx.lock();
 	if (m_MemPoolMgr->m_AllocMap.find((UINT_PTR)address) != m_MemPoolMgr->m_AllocMap.end()) {
 		short refCnt = InterlockedDecrement16(&m_MemPoolMgr->m_AllocMap[(UINT_PTR)address]);
@@ -279,6 +287,8 @@ void TlsMemPool<T>::FreeMem(T* address, std::string log) {
 	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
 	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].address = (UINT_PTR)address;
 	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].log = log;
+#else
+void TlsMemPool<T>::FreeMem(T * address) {
 #endif
 
 #if defined(MEM_POOL_NODE)
@@ -401,9 +411,9 @@ inline void TlsMemPool<T>::InjectNewMem(T* address)
 }
 
 template<typename T>
+#if defined(ALLOC_MEM_LOG)
 inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt, std::string log)
 {
-#if defined(ALLOC_MEM_LOG)
 	m_MemPoolMgr->m_AllocMapMtx.lock();
 	if (m_MemPoolMgr->m_AllocMap.find((UINT_PTR)address) != m_MemPoolMgr->m_AllocMap.end()) {
 		for (USHORT i = 0; i < refCnt; i++) {
@@ -418,6 +428,9 @@ inline void TlsMemPool<T>::IncrementRefCnt(T* address, USHORT refCnt, std::strin
 	USHORT allocMemLogIdx = InterlockedIncrement16((short*)&m_MemPoolMgr->m_AllocLogIndex);
 	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].address = (UINT_PTR)address;
 	m_MemPoolMgr->m_AllocLog[allocMemLogIdx].log = log;
+#else
+inline void TlsMemPool<T>::IncrementRefCnt(T * address, USHORT refCnt)
+{
 #endif
 
 	if (m_ReferenceFlag) {
