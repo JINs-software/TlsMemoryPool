@@ -157,8 +157,10 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, Args... args) {
 
 #if defined(MEMORY_POOL_ALLOC_FREE_TRACKING)
 	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
 #elif defined(MEMORY_USAGE_TRACKING)
 	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
+	InterlockedIncrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
 	m_MemPoolMgr->ResetMemInfo(m_UnitCount, m_MallocCnt);
 #endif
 
@@ -263,6 +265,7 @@ void TlsMemPool<T>::FreeMem(T * address) {
 
 #if defined(MEMORY_POOL_ALLOC_FREE_TRACKING)
 	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
+	InterlockedDecrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
 #elif defined(MEMORY_USAGE_TRACKING)
 	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
 	m_MemPoolMgr->ResetMemInfo(m_UnitCount, m_MallocCnt);
@@ -399,11 +402,15 @@ private:
 public:
 	size_t totalAllocMemCnt = 0;
 	size_t totalFreeMemCnt = 0;
+	size_t allocatedMemUnitCnt = 0;
 	inline size_t GetTotalAllocMemCnt() {
 		return totalAllocMemCnt;
 	}
 	inline size_t GetTotalFreeMemCnt() {
 		return totalFreeMemCnt;
+	}
+	inline size_t GetAllocatedMemUnitCnt() {
+		return allocatedMemUnitCnt;
 	}
 #elif defined(MEMORY_USAGE_TRACKING)
 public:
@@ -417,6 +424,9 @@ public:
 	}
 	inline size_t GetTotalFreeMemCnt() {
 		return totalFreeMemCnt;
+	}
+	inline size_t GetAllocatedMemUnitCnt() {
+		return allocatedMemUnitCnt;
 	}
 	inline size_t GetTotalIncrementRefCnt() {
 		return totalIncrementRefCnt;
