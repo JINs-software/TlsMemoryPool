@@ -6,12 +6,13 @@
 
 //#define MEMORY_USAGE_TRACKING
 #define	MEMORY_POOL_ALLOC_FREE_TRACKING
-struct stMemoryPoolUseInfo {
-	size_t	tlsMemPoolUnitCnt = 0;
-	size_t	tlsMemPoolAllocCnt = 0;
-	size_t	tlsMemPoolFreeCnt = 0;
-	size_t	tlsInjectMemCnt = 0;
-};
+//struct stMemoryPoolUseInfo {
+//	size_t	tlsMemPoolUnitCnt = 0;
+//	size_t	tlsMemPoolAllocCnt = 0;
+//	size_t	tlsMemPoolFreeCnt = 0;
+//	size_t	tlsInjectMemCnt = 0;
+//};
+//=> 오버플로우 문제 발생, 카운트 변수를 전역 또는 메모리 풀 관리자가 직접 관리한다면, 오버플로우가 발생하여도, Alloc/Free Cnt가 동일할 것
 
 template<typename T>
 class TlsMemPoolManager;
@@ -52,16 +53,6 @@ public:
 		return sizeof(stMemPoolNode<T>) * m_UnitCount;
 	}
 
-	inline size_t GetAllocCount() {
-		return m_AllocCount;
-	}
-	inline size_t GetFreeCount() {
-		return m_FreeCount;
-	}
-	inline size_t GetInjectMemCnt() {
-		return m_InjectMemCount;
-	}
-
 private:
 	template<typename... Args>
 	void InjectNewMem(T* address, Args... args);
@@ -74,18 +65,13 @@ private:
 	bool	m_PlacementNewFlag;
 	bool	m_ReferenceFlag;
 
-	size_t	m_AllocCount;
-	size_t	m_FreeCount;
-	size_t  m_InjectMemCount;
-
 	DWORD	m_ThreadID;
 };
 
 template<typename T>
 template<typename... Args>
 TlsMemPool<T>::TlsMemPool(size_t unitCnt, size_t capacity, bool referenceFlag,  bool placementNew, Args... args)
-	: m_MemPoolMgr(NULL), m_FreeFront(NULL), m_UnitCount(unitCnt), m_UnitCapacity(capacity), m_ReferenceFlag(referenceFlag), m_PlacementNewFlag(placementNew), 
-	m_AllocCount(0), m_FreeCount(0), m_InjectMemCount(0)
+	: m_MemPoolMgr(NULL), m_FreeFront(NULL), m_UnitCount(unitCnt), m_UnitCapacity(capacity), m_ReferenceFlag(referenceFlag), m_PlacementNewFlag(placementNew)
 {
 	m_ThreadID = GetThreadId(GetCurrentThread());
 
@@ -151,11 +137,6 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, Args... args) {
 		SHORT* refCntPtr = reinterpret_cast<SHORT*>(reinterpret_cast<PBYTE>(&node->next) + sizeof(stMemPoolNode<T>*));
 		refCntPtr -= 1;
 		*refCntPtr = refCnt;
-#if defined(MEMORY_USAGE_TRACKING)
-		for (SHORT i = 0; i < refCnt; i++) {
-			InterlockedIncrement64((int64*)&m_MemPoolMgr->totalIncrementRefCnt);
-		}
-#endif
 	}
 
 	T* ret = reinterpret_cast<T*>(node);
@@ -163,17 +144,8 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, Args... args) {
 		new (ret) T(args...);
 	}
 
-	m_AllocCount++;
+	m_MemPoolMgr->ResetMemPoolUsageCount(true);
 
-#if defined(MEMORY_POOL_ALLOC_FREE_TRACKING)
-	//InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
-	//InterlockedIncrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
-	m_MemPoolMgr->ResetMemInfo(m_ThreadID, m_UnitCount, m_AllocCount, m_FreeCount, m_InjectMemCount);
-#elif defined(MEMORY_USAGE_TRACKING)
-	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalAllocMemCnt);
-	InterlockedIncrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
-	m_MemPoolMgr->ResetMemInfo(m_UnitCount, m_MallocCnt);
-#endif
 	return ret;
 }
 
@@ -213,16 +185,7 @@ void TlsMemPool<T>::FreeMem(T * address) {
 		m_MemPoolMgr->Free(address);
 	}
 
-	m_FreeCount++;
-
-#if defined(MEMORY_POOL_ALLOC_FREE_TRACKING)
-	//InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
-	//InterlockedDecrement64((int64*)&m_MemPoolMgr->allocatedMemUnitCnt);
-	m_MemPoolMgr->ResetMemInfo(m_ThreadID, m_UnitCount, m_AllocCount, m_FreeCount, m_InjectMemCount);
-#elif defined(MEMORY_USAGE_TRACKING)
-	InterlockedIncrement64((int64*)&m_MemPoolMgr->totalFreeMemCnt);
-	m_MemPoolMgr->ResetMemInfo(m_UnitCount, m_MallocCnt);
-#endif
+	m_MemPoolMgr->ResetMemPoolUsageCount(false);
 }
 
 template<typename T>
@@ -238,13 +201,10 @@ inline void TlsMemPool<T>::InjectNewMem(T* address, Args... args)
 		node->next = m_FreeFront;
 		m_FreeFront = node;
 		m_UnitCount++;
-		m_InjectMemCount++;
 	}
 	else {
 		m_MemPoolMgr->Free(address);
 	}
-
-	m_MemPoolMgr->ResetMemInfo(m_ThreadID, m_UnitCount, m_AllocCount, m_FreeCount, m_InjectMemCount);
 }
 
 template<typename T>
@@ -304,7 +264,6 @@ public:
 	TlsMemPoolManager(size_t defaultMemUnitCnt = 0, size_t defaultMemUnitCapacity = 0, bool memUnitReferenceFlag = false, bool memUnitPlacementNewFlag = false)
 		: m_DefaultMemUnitCnt(defaultMemUnitCnt), m_DefaultMemUnitCapacity(defaultMemUnitCapacity), m_MemUnitReferenceFlag(memUnitReferenceFlag), m_MemUnitPlacementNewFlag(memUnitPlacementNewFlag)
 	{
-		InitializeSRWLock(&m_ThreadMemInfoSrwLock);
 		m_TlsIMainIndex = TlsAlloc();
 		m_TlsSurpIndex = TlsAlloc();
 	}
@@ -332,59 +291,100 @@ private:
 
 #if defined	MEMORY_POOL_ALLOC_FREE_TRACKING
 public:
-	size_t totalAllocMemCnt = 0;
-	size_t totalFreeMemCnt = 0;
-	size_t totalInjectedMemCnt = 0;
-	size_t allocatedMemUnitCnt = 0;
+	//size_t totalAllocMemCnt = 0;
+	//size_t totalFreeMemCnt = 0;
+	//size_t totalInjectedMemCnt = 0;
+	//
+	//size_t allocatedMemUnitCnt = 0;
+	//
+	//inline size_t GetTotalAllocMemCnt() {
+	//	totalAllocMemCnt = 0;
+	//
+	//	AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//	for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
+	//		totalAllocMemCnt += iter->second.tlsMemPoolAllocCnt;
+	//	}
+	//	ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//
+	//	return totalAllocMemCnt;
+	//}
+	//inline size_t GetTotalFreeMemCnt() {
+	//	totalFreeMemCnt = 0;
+	//
+	//	AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//	for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
+	//		totalFreeMemCnt += iter->second.tlsMemPoolFreeCnt;
+	//	}
+	//	ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//
+	//	return totalFreeMemCnt;
+	//}
+	//inline size_t GetTotalInjectedMemCnt() {
+	//	totalInjectedMemCnt = 0;
+	//
+	//	AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//	for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
+	//		totalInjectedMemCnt += iter->second.tlsInjectMemCnt;
+	//	}
+	//	ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//
+	//	return totalInjectedMemCnt;
+	//}
+	//inline size_t GetAllocatedMemUnitCnt() {
+	//	size_t allocMemCnt = GetTotalAllocMemCnt();
+	//	size_t freeMemCnt = GetTotalFreeMemCnt();
+	//	if (allocMemCnt < freeMemCnt) {
+	//		DebugBreak();
+	//	}
+	//	return allocMemCnt - freeMemCnt;
+	//}
+	//
+	//// 스레드 별 메모리 정보
+	//std::unordered_map<DWORD, stMemoryPoolUseInfo>  m_ThreadMemInfo;
+	//SRWLOCK											m_ThreadMemInfoSrwLock;
+	//void ResetMemInfo(DWORD thID, size_t tlsMemPoolUnitCnt, size_t tlsMemPoolAllocCnt, size_t tlsMemPoolFreeCnt, size_t tlsInjectMemCnt) {
+	//	AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//	m_ThreadMemInfo[thID].tlsMemPoolUnitCnt = tlsMemPoolUnitCnt;
+	//	m_ThreadMemInfo[thID].tlsMemPoolAllocCnt = tlsMemPoolAllocCnt;
+	//	m_ThreadMemInfo[thID].tlsMemPoolFreeCnt = tlsMemPoolFreeCnt;
+	//	m_ThreadMemInfo[thID].tlsInjectMemCnt = tlsInjectMemCnt;
+	//	ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
+	//}
 
-	inline size_t GetTotalAllocMemCnt() {
-		totalAllocMemCnt = 0;
+	// => 오버플로우 문제 발생
 
-		AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
-		for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
-			totalAllocMemCnt += iter->second.tlsMemPoolAllocCnt;
+	UINT64 m_TotalAllocMemCount = 0;
+	UINT64 m_TotalFreeMemCount = 0;
+	INT64 m_AllocatedMemUnitCount = 0;
+	UINT64 m_MallocCount = 0;
+
+	inline void ResetMemPoolUsageCount(bool allocFlag) {
+		if (allocFlag) {
+			InterlockedIncrement64(&m_AllocatedMemUnitCount);
+			InterlockedIncrement64((INT64*)&m_TotalAllocMemCount);
 		}
-		ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
-
-		return totalAllocMemCnt;
-	}
-	inline size_t GetTotalFreeMemCnt() {
-		totalFreeMemCnt = 0;
-
-		AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
-		for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
-			totalFreeMemCnt += iter->second.tlsMemPoolFreeCnt;
+		else {
+			InterlockedDecrement64(&m_AllocatedMemUnitCount);
+			InterlockedIncrement64((INT64*)&m_TotalFreeMemCount);
 		}
-		ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
-
-		return totalFreeMemCnt;
 	}
-	inline size_t GetTotalInjectedMemCnt() {
-		totalInjectedMemCnt = 0;
 
-		AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
-		for (auto iter = m_ThreadMemInfo.begin(); iter != m_ThreadMemInfo.end(); iter++) {
-			totalInjectedMemCnt += iter->second.tlsInjectMemCnt;
+	inline UINT64 GetTotalAllocMemCnt() {
+		return m_TotalAllocMemCount;
+	}
+	inline UINT64 GetTotalFreeMemCnt() {
+		return m_TotalFreeMemCount;
+	}
+	inline INT64 GetAllocatedMemUnitCnt() {
+		if (m_AllocatedMemUnitCount < 0) {
+			DebugBreak();
 		}
-		ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
-
-		return totalInjectedMemCnt;
+		return m_AllocatedMemUnitCount;
 	}
-	inline size_t GetAllocatedMemUnitCnt() {
-		return GetTotalAllocMemCnt() - GetTotalFreeMemCnt();
+	inline UINT64 GetMallocCount() {
+		return m_MallocCount;
 	}
 
-	// 스레드 별 메모리 정보
-	std::unordered_map<DWORD, stMemoryPoolUseInfo>  m_ThreadMemInfo;
-	SRWLOCK											m_ThreadMemInfoSrwLock;
-	void ResetMemInfo(DWORD thID, size_t tlsMemPoolUnitCnt, size_t tlsMemPoolAllocCnt, size_t tlsMemPoolFreeCnt, size_t tlsInjectMemCnt) {
-		AcquireSRWLockShared(&m_ThreadMemInfoSrwLock);
-		m_ThreadMemInfo[thID].tlsMemPoolUnitCnt = tlsMemPoolUnitCnt;
-		m_ThreadMemInfo[thID].tlsMemPoolAllocCnt = tlsMemPoolAllocCnt;
-		m_ThreadMemInfo[thID].tlsMemPoolFreeCnt = tlsMemPoolFreeCnt;
-		m_ThreadMemInfo[thID].tlsInjectMemCnt = tlsInjectMemCnt;
-		ReleaseSRWLockShared(&m_ThreadMemInfoSrwLock);
-	}
 #elif defined(MEMORY_USAGE_TRACKING)
 public:
 	// 전체 메모리 정보
@@ -465,11 +465,6 @@ inline DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memUnitCnt, size_t mem
 		m_ThMemPoolMapMtx.lock();
 		m_ThMemPoolMap.insert({ thID , newLockFreeMemPool });
 		m_ThMemPoolMapMtx.unlock();
-		
-		// 스레드 별 메모리 풀 정보 맵 삽입
-		AcquireSRWLockExclusive(&m_ThreadMemInfoSrwLock);
-		m_ThreadMemInfo.insert({ thID, { 0 } });
-		ReleaseSRWLockExclusive(&m_ThreadMemInfoSrwLock);
 
 #if defined(MEMORY_USAGE_TRACKING)
 		ResetMemInfo(memUnitCnt, 0);
@@ -526,6 +521,8 @@ void TlsMemPoolManager<T>::Alloc()
 			else {
 				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(stMemPoolNode<T>)));
 				tlsMemPool->InjectNewMem(newAlloc);
+
+				InterlockedIncrement64((INT64*)&m_MallocCount);
 			}
 		} while (tlsMemPool->m_FreeFront == NULL);
 	}
