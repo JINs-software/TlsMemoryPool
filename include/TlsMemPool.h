@@ -4,6 +4,8 @@
 #include <unordered_map>
 #include <mutex>
 
+#define TLS_MEMPOOL_ASSERT
+
 //#define MEMORY_USAGE_TRACKING
 #define	MEMORY_POOL_ALLOC_FREE_TRACKING
 //struct stMemoryPoolUseInfo {
@@ -128,7 +130,11 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, Args... args) {
 	if (node != NULL) {
 		m_FreeFront = m_FreeFront->next;
 		if (m_UnitCount == 0) {
+#if defined(TLS_MEMPOOL_ASSERT)
 			DebugBreak();
+#else
+			m_UnitCount = 1;	// 임시 방편
+#endif
 		}
 		m_UnitCount--;
 	}
@@ -167,8 +173,12 @@ void TlsMemPool<T>::FreeMem(T * address) {
 		}
 
 		if (refCnt < 0) {
+#if defined(TLS_MEMPOOL_ASSERT)
 			// 의도되지 않은 흐름
 			DebugBreak();
+#else
+			return;
+#endif
 		}
 	}
 
@@ -222,9 +232,11 @@ inline void TlsMemPool<T>::IncrementRefCnt(T * address, USHORT refCnt) {
 #endif
 		}
 	}
+#if defined(TLS_MEMPOOL_ASSERT)
 	else {
 		DebugBreak();
 	}
+#endif
 }
 
 
