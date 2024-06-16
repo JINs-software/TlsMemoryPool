@@ -278,6 +278,8 @@ public:
 	{
 		m_TlsIMainIndex = TlsAlloc();
 		m_TlsSurpIndex = TlsAlloc();
+
+		InitializeSRWLock(&m_ThMemPoolMapSrwLock);
 	}
 
 	template<typename... Args>
@@ -300,8 +302,8 @@ private:
 	bool	m_MemUnitReferenceFlag;
 	bool	m_MemUnitPlacementNewFlag;
 
-	std::map<DWORD, LockFreeMemPool*> m_ThMemPoolMap;
-	std::mutex m_ThMemPoolMapMtx;
+	std::map<DWORD, LockFreeMemPool*>	m_ThMemPoolMap;
+	SRWLOCK								m_ThMemPoolMapSrwLock;
 
 #if defined	MEMORY_POOL_ALLOC_FREE_TRACKING
 public:
@@ -476,9 +478,9 @@ inline DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memUnitCnt, size_t mem
 		DWORD thID = GetThreadId(GetCurrentThread());
 		
 		// 스레드 별 메모리 풀 맵 삽입
-		m_ThMemPoolMapMtx.lock();
+		AcquireSRWLockExclusive(&m_ThMemPoolMapSrwLock);
 		m_ThMemPoolMap.insert({ thID , newLockFreeMemPool });
-		m_ThMemPoolMapMtx.unlock();
+		ReleaseSRWLockExclusive(&m_ThMemPoolMapSrwLock);
 
 #if defined(MEMORY_USAGE_TRACKING)
 		ResetMemInfo(memUnitCnt, 0);
@@ -512,18 +514,18 @@ void TlsMemPoolManager<T>::Alloc(Args... args)
 			LockFreeMemPool* maxFreeCntPool = NULL;
 			DWORD exgTargetThID;
 			size_t maxCnt = 0;
-			{
-				std::lock_guard<std::mutex> lockGuard(m_ThMemPoolMapMtx);
-
-				typename std::map<DWORD, LockFreeMemPool*>::iterator iter = m_ThMemPoolMap.begin();
-				for (; iter != m_ThMemPoolMap.end(); iter++) {
-					LockFreeMemPool* lfmp = iter->second;
-					if (lfmp->GetFreeCnt() > maxCnt) {
-						maxFreeCntPool = lfmp;
-						exgTargetThID = iter->first;
-					}
+			
+			AcquireSRWLockShared(&m_ThMemPoolMapSrwLock);
+			typename std::map<DWORD, LockFreeMemPool*>::iterator iter = m_ThMemPoolMap.begin();
+			for (; iter != m_ThMemPoolMap.end(); iter++) {
+				LockFreeMemPool* lfmp = iter->second;
+				if (lfmp->GetFreeCnt() > maxCnt) {
+					maxFreeCntPool = lfmp;
+					exgTargetThID = iter->first;
 				}
 			}
+			ReleaseSRWLockShared(&m_ThMemPoolMapSrwLock);
+			
 
 			if (maxFreeCntPool != NULL) {
 				tlsMemPool->m_FreeFront = reinterpret_cast<stMemPoolNode<T>*>(maxFreeCntPool->AllocLFM(tlsMemPool->m_UnitCount));
