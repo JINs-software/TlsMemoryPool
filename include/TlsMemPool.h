@@ -118,7 +118,7 @@ T* TlsMemPool<T>::AllocMem(SHORT refCnt, Args... args) {
 		// 할당 공간 부족..
 		if (m_MemPoolMgr != NULL) {
 			// 메모리 풀 관리자에서 할당을 요청한다.
-			m_MemPoolMgr->Alloc();
+			m_MemPoolMgr->Alloc(args...);
 		}
 		else {
 			T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(stMemPoolNode<T>)));
@@ -287,7 +287,9 @@ public:
 
 	inline TlsMemPool<T>& GetTlsMemPool() { return *reinterpret_cast<TlsMemPool<T>*>(TlsGetValue(m_TlsIMainIndex)); }
 
-	void Alloc();
+	template<typename... Args>
+	void Alloc(Args... args);
+
 	void Free(T* address);
 
 private:
@@ -487,7 +489,8 @@ inline DWORD TlsMemPoolManager<T>::AllocTlsMemPool(size_t memUnitCnt, size_t mem
 }
 
 template<typename T>
-void TlsMemPoolManager<T>::Alloc()
+template<typename... Args>
+void TlsMemPoolManager<T>::Alloc(Args... args)
 {
 	TlsMemPool<T>* tlsMemPool = reinterpret_cast<TlsMemPool<T>*>(TlsGetValue(m_TlsIMainIndex));
 	LockFreeMemPool* lfMemPool = reinterpret_cast<LockFreeMemPool*>(TlsGetValue(m_TlsSurpIndex));
@@ -532,7 +535,7 @@ void TlsMemPoolManager<T>::Alloc()
 			}
 			else {
 				T* newAlloc = reinterpret_cast<T*>(malloc(sizeof(stMemPoolNode<T>)));
-				tlsMemPool->InjectNewMem(newAlloc);
+				tlsMemPool->InjectNewMem(newAlloc, args...);
 
 				InterlockedIncrement64((INT64*)&m_MallocCount);
 			}
