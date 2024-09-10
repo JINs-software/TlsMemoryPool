@@ -15,6 +15,9 @@ unsigned __stdcall WorkerThreadFunc(void* arg) {
 }
 
 int main() {
+
 	HANDLE thHnd = (HANDLE)_beginthreadex(NULL, 0, WorkerThreadFunc, NULL, 0, NULL);
+
 	WaitForSingleObject(thHnd, INFINITE);
+
 }
