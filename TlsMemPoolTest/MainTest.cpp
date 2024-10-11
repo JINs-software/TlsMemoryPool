@@ -20,4 +20,5 @@ int main() {
 
 	WaitForSingleObject(thHnd, INFINITE);
 
+	return 0;
 }
