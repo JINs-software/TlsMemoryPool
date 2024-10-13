@@ -11,10 +11,8 @@
 template<typename T>
 class TlsMemPoolManager;
 
-/**
-* @class TlsMemPool
-* @brief TLS에 할당될 메모리 풀
-*/
+/// @class TlsMemPool
+/// @brief TLS에 할당될 메모리 풀
 template<typename T>
 class TlsMemPool {
 	friend class TlsMemPoolManager<T>;
@@ -26,26 +24,23 @@ private:
 	// private 생성자 -> 임의의 생성을 막는다. 
 	// placementNew == true, Alloc / Free 시 placement_new, ~() 소멸자 호출
 	// placementNew == false, 메모리 풀에서는 생성자까지 호출된 객체로부터 관리가 시작되어야 함 (240417 논의)
-	/**
-	* @brief TlsMemPool 생성자(private), TlsMemPool에 대한 관리는 생성 및 관리는 전적으로 TlsMemPoolManager를 통해 이루어짐.
-	* 
-	* @param unitCnt 메모리 풀에 미리 할당될 객체 단위의 갯수
-	* @param capacity 메모리 풀에 미리 할당될 객체 단위의 용량(최대 갯수)
-	* @param referenceFlag 참조 플래그가 on이면 할당되는 객체는 참조 관리를 받을 수 있음. IncrementRefCnt() 호출 시 참조 카운트를 증가 시킬 수 있으며, FreeMem()을 통한 반환 시 이 참조 카운트를 통해 반환 여부를 결정. 
-	* @param placementNew placementNew가 on이면 할당 시 placement_new를 통해 객체를 생성하고, 반환 시 명시적으로 소멸자를 호출함. 반면 off 시 기본 생성자로 호출된 객체가 관리됨.
-	* @todo placement new 방식에서 가변 인자 활용 추가
-	*/
+
+	/// @brief TlsMemPool 생성자(private), TlsMemPool에 대한 관리는 생성 및 관리는 전적으로 TlsMemPoolManager를 통해 이루어짐.
+	/// 
+	/// @param unitCnt 메모리 풀에 미리 할당될 객체 단위의 갯수
+	/// @param capacity 메모리 풀에 미리 할당될 객체 단위의 용량(최대 갯수)
+	/// @param referenceFlag 참조 플래그가 on이면 할당되는 객체는 참조 관리를 받을 수 있음. IncrementRefCnt() 호출 시 참조 카운트를 증가 시킬 수 있으며, FreeMem()을 통한 반환 시 이 참조 카운트를 통해 반환 여부를 결정. 
+	/// @param placementNew placementNew가 on이면 할당 시 placement_new를 통해 객체를 생성하고, 반환 시 명시적으로 소멸자를 호출함. 반면 off 시 기본 생성자로 호출된 객체가 관리됨.
+	/// @todo placement new 방식에서 가변 인자 활용 추가
 	template<typename... Args>
 	TlsMemPool(size_t unitCnt, size_t capacity, bool referenceFlag = false, bool placementNew = false, Args... args);
 	~TlsMemPool();
 
 public:
-	/**
-	* @brief 메모리 풀 내 객체 할당
-	* @param refCnt 참조를 지원하는 메모리 풀일 경우 참조 카운트를 선 지정 가능
-	* @return 메모리 풀 내 객체 주소 반환
-	* @todo placement new 방식에서 가변 인자 활용 추가
-	*/
+	/// @brief 메모리 풀 내 객체 할당
+	/// @param refCnt 참조를 지원하는 메모리 풀일 경우 참조 카운트를 선 지정 가능
+	/// @return 메모리 풀 내 객체 주소 반환
+	/// @todo placement new 방식에서 가변 인자 활용 추가
 	template<typename... Args>
 	T* AllocMem(SHORT refCnt = 1, Args... args);
 
